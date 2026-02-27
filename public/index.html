@@ -61,6 +61,7 @@
      SCREEN: LOBBY
 ══════════════════════════════════════════════════ -->
 <div id="screen-lobby" class="screen">
+  <div class="lobby-wrap">
   <div class="lobby-layout">
 
     <!-- Left: player list -->
@@ -111,6 +112,14 @@
     </div>
 
   </div>
+
+    <!-- All players' cameras -->
+    <div id="lobby-grid-slot" class="lobby-grid-slot">
+      <p class="cam-test-title">📹 Камеры игроков</p>
+      <!-- #video-grid inserted here by JS -->
+    </div>
+
+  </div><!-- /lobby-wrap -->
 </div>
 
 <!-- ══════════════════════════════════════════════════
@@ -130,8 +139,8 @@
   <!-- Main area: videos + panels -->
   <div class="game-body">
 
-    <!-- Video grid -->
-    <div id="video-grid" class="video-grid"></div>
+    <!-- Video grid slot (grid injected by JS) -->
+    <div id="game-grid-slot"></div>
 
     <!-- ── Speaking panel ── -->
     <div id="panel-speaking" class="action-panel hidden">
@@ -210,6 +219,9 @@
   </div>
 
 </div><!-- /screen-game -->
+
+<!-- Shared video grid (moved between lobby and game by JS) -->
+<div id="video-grid" class="video-grid"></div>
 
 <!-- ── Video tile template ── -->
 <template id="tmpl-video-tile">

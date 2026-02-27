@@ -127,8 +127,13 @@ input[type="text"]:focus { border-color: var(--accent); }
   background: var(--bg); padding: 30px 16px;
 }
 
+.lobby-wrap {
+  width: min(900px, 98vw);
+  display: flex; flex-direction: column; gap: 18px;
+  padding-bottom: 30px;
+}
 .lobby-layout {
-  display: flex; gap: 20px; width: min(900px, 98vw); align-items: flex-start;
+  display: flex; gap: 20px; width: 100%; align-items: flex-start;
 }
 .lobby-main { flex: 1; display: flex; flex-direction: column; gap: 14px; }
 
@@ -160,6 +165,18 @@ input[type="text"]:focus { border-color: var(--accent); }
   border-radius: 10px; padding: 12px 16px; font-size: .84rem; line-height: 1.8;
 }
 .rules-card ol { padding-left: 18px; color: var(--muted); }
+
+/* Lobby cameras grid slot */
+.lobby-grid-slot {
+  width: 100%;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.lobby-grid-slot .video-grid {
+  flex: unset;
+  min-height: 120px;
+  max-height: 320px;
+  overflow-y: auto;
+}
 
 /* Lobby camera column */
 .lobby-cam-col {
@@ -226,6 +243,11 @@ input[type="text"]:focus { border-color: var(--accent); }
 }
 
 /* ─── Video grid ─────────────────────────────────────────────────────────── */
+#game-grid-slot {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+}
+
 .video-grid {
   display: flex; flex-wrap: wrap; align-content: flex-start;
   gap: 5px; padding: 6px; overflow-y: auto;

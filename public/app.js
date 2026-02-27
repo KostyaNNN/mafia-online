@@ -39,6 +39,15 @@ const $$ = (s) => document.querySelectorAll(s);
 function showScreen(name) {
   $$('.screen').forEach(s => s.classList.remove('active'));
   $(`#screen-${name}`).classList.add('active');
+  // Move the shared video grid into the correct slot
+  const grid = document.getElementById('video-grid');
+  if (name === 'lobby') {
+    const slot = document.getElementById('lobby-grid-slot');
+    if (slot && grid) slot.appendChild(grid);
+  } else if (name === 'game') {
+    const slot = document.getElementById('game-grid-slot');
+    if (slot && grid) slot.appendChild(grid);
+  }
 }
 function showErr(id, msg, ms = 5000) {
   const el = document.getElementById(id);
@@ -302,7 +311,9 @@ socket.on('room:state', (state) => {
     if (state.phase === 'lobby') {
       showScreen('lobby');
       renderLobby(state);
-      // wire lobby cam
+      ensureMyTile();
+      sortTilesByJoinIndex();
+      // wire lobby cam preview (own small preview in right column)
       if (localStream) {
         const vid = $('#lobby-cam-preview');
         if (!vid.srcObject) { vid.srcObject = localStream; vid.style.display = 'block'; $('#lobby-cam-placeholder').classList.add('hidden'); }
