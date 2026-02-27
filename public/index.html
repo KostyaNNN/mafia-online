@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Мафия Онлайн</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════
+     SCREENS
+════════════════════════════════════════════════════════ -->
+
+<!-- ── Join Screen ───────────────────────────────────────────── -->
+<div id="screen-join" class="screen active">
+  <div class="join-card">
+    <h1 class="logo">🎭 Мафия</h1>
+    <p class="subtitle">Браузерная игра с видеосвязью</p>
+    <div class="form-group">
+      <label for="inp-name">Ваше имя</label>
+      <input id="inp-name" type="text" placeholder="Введите имя" maxlength="24" autocomplete="off" />
+    </div>
+    <div class="form-group">
+      <label for="inp-room">Код комнаты</label>
+      <input id="inp-room" type="text" placeholder="Введите или оставьте пустым" maxlength="8" autocomplete="off" />
+    </div>
+    <button id="btn-join" class="btn btn-primary">Войти / Создать</button>
+    <p id="join-error" class="error-text hidden"></p>
+    <div class="hint">Оставьте код пустым — будет создана новая комната.<br>
+    Минимум 4 игрока, максимум 10.</div>
+  </div>
+</div>
+
+<!-- ── Lobby Screen ───────────────────────────────────────────── -->
+<div id="screen-lobby" class="screen">
+  <div class="lobby-container">
+    <div class="lobby-header">
+      <h2>Лобби</h2>
+      <div class="room-badge">Комната: <span id="lbl-room-id">—</span></div>
+      <button id="btn-copy-link" class="btn btn-sm">📋 Скопировать ссылку</button>
+    </div>
+    <ul id="player-list" class="player-list"></ul>
+    <div class="lobby-actions">
+      <button id="btn-ready" class="btn btn-secondary">✅ Готов</button>
+      <button id="btn-start" class="btn btn-primary hidden">▶ Начать игру</button>
+    </div>
+    <p id="lobby-error" class="error-text hidden"></p>
+  </div>
+</div>
+
+<!-- ── Game Screen ────────────────────────────────────────────── -->
+<div id="screen-game" class="screen">
+
+  <!-- Top bar -->
+  <div class="game-topbar">
+    <div id="game-phase-label" class="phase-label">Ночь • Раунд 1</div>
+    <div id="game-timer" class="timer">60</div>
+    <div id="my-role-badge" class="role-badge"></div>
+  </div>
+
+  <!-- Video grid -->
+  <div id="video-grid" class="video-grid"></div>
+
+  <!-- Night action panel -->
+  <div id="panel-night" class="action-panel hidden">
+    <h3 id="night-action-title">🌙 Ночное действие</h3>
+    <p id="night-action-desc" class="small-text"></p>
+    <div id="night-targets" class="target-list"></div>
+    <p id="night-status" class="status-text"></p>
+  </div>
+
+  <!-- Day phase info -->
+  <div id="panel-day" class="action-panel hidden">
+    <h3>☀️ День — обсуждение</h3>
+    <div id="night-result-banner" class="result-banner hidden"></div>
+  </div>
+
+  <!-- Voting panel -->
+  <div id="panel-voting" class="action-panel hidden">
+    <h3>🗳 Голосование</h3>
+    <p class="small-text">Выберите того, кого хотите выгнать</p>
+    <div id="voting-targets" class="target-list"></div>
+  </div>
+
+  <!-- Result panel -->
+  <div id="panel-result" class="action-panel hidden">
+    <div id="result-content"></div>
+  </div>
+
+  <!-- Game over panel -->
+  <div id="panel-gameover" class="action-panel hidden">
+    <h2 id="gameover-title"></h2>
+    <p id="gameover-reason"></p>
+    <div id="roles-reveal" class="roles-reveal"></div>
+    <button id="btn-back-lobby" class="btn btn-secondary">↩ В лобби</button>
+  </div>
+
+  <!-- Spectator notice -->
+  <div id="panel-spectator" class="spectator-notice hidden">👁 Вы наблюдаете — вы выбыли</div>
+
+  <!-- Chat -->
+  <div id="chat-container" class="chat-container">
+    <div id="chat-messages" class="chat-messages"></div>
+    <div class="chat-input-row">
+      <input id="chat-input" type="text" placeholder="Сообщение…" maxlength="300" autocomplete="off" />
+      <button id="btn-send-chat" class="btn btn-sm">→</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- ─── Templates ──────────────────────────────────────────── -->
+<!-- Video tile template (cloned in JS) -->
+<template id="tmpl-video-tile">
+  <div class="video-tile">
+    <video autoplay playsinline muted></video>
+    <div class="video-overlay">
+      <span class="player-name-tag"></span>
+      <span class="player-status-tag"></span>
+    </div>
+    <div class="mafia-badge hidden">МАФИЯ</div>
+  </div>
+</template>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
