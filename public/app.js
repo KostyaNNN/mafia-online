@@ -30,6 +30,7 @@ let micMuted      = false;
 let camOff        = false;
 const peers       = new Map();   // peerId → RTCPeerConnection
 const peerNames   = new Map();   // peerId → name
+const iceBuffer   = new Map();   // peerId → RTCIceCandidateInit[] (buffered before remoteDesc)
 
 // ────────────────────── helpers ──────────────────────
 const $  = (s) => document.querySelector(s);
@@ -177,6 +178,14 @@ async function startLocalMedia() {
     vid.style.display = 'block';
     $('#lobby-cam-placeholder').classList.add('hidden');
     startAudioMeter(localStream, 'lobby-audio-bar', 'lobby-audio-meter-wrap');
+
+    // Add tracks to any PCs that were created before localStream was ready
+    for (const [, pc] of peers) {
+      const senders = pc.getSenders();
+      localStream.getTracks().forEach(t => {
+        if (!senders.find(s => s.track === t)) pc.addTrack(t, localStream);
+      });
+    }
   }
 }
 
@@ -451,22 +460,44 @@ socket.on('rtc:peer-left', (peerId) => {
 socket.on('rtc:offer', async (fromId, offer) => {
   const pc = createPC(fromId);
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  await flushIceBuffer(fromId);
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   socket.emit('rtc:answer', fromId, { type: answer.type, sdp: answer.sdp });
 });
 
 socket.on('rtc:answer', async (fromId, answer) => {
-  await peers.get(fromId)?.setRemoteDescription(new RTCSessionDescription(answer));
+  const pc = peers.get(fromId);
+  if (!pc) return;
+  await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  await flushIceBuffer(fromId);
 });
 
 socket.on('rtc:ice', async (fromId, candidate) => {
-  try { await peers.get(fromId)?.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
+  const pc = peers.get(fromId);
+  if (!pc || !pc.remoteDescription) {
+    // buffer until remote description is set
+    const buf = iceBuffer.get(fromId) ?? [];
+    buf.push(candidate);
+    iceBuffer.set(fromId, buf);
+    return;
+  }
+  try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
 });
 
 // ═══════════════════════════════════════════════════════
 //  WEBRTC HELPERS
 // ═══════════════════════════════════════════════════════
+
+async function flushIceBuffer(peerId) {
+  const pc   = peers.get(peerId);
+  const bufs = iceBuffer.get(peerId);
+  if (!pc || !bufs) return;
+  iceBuffer.delete(peerId);
+  for (const c of bufs) {
+    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch (_) {}
+  }
+}
 
 function createPC(peerId) {
   if (peers.has(peerId)) return peers.get(peerId);
@@ -478,7 +509,13 @@ function createPC(peerId) {
     if (e.candidate) socket.emit('rtc:ice', peerId, e.candidate.toJSON());
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed') { pc.close(); peers.delete(peerId); }
+    if (pc.connectionState === 'failed') {
+      pc.close();
+      peers.delete(peerId);
+      iceBuffer.delete(peerId);
+      // retry call if we are the designated initiator
+      if (myId < peerId) setTimeout(() => callPeer(peerId), 1000);
+    }
   };
   return pc;
 }
@@ -493,6 +530,7 @@ async function callPeer(peerId) {
 function closePeer(peerId) {
   peers.get(peerId)?.close();
   peers.delete(peerId);
+  iceBuffer.delete(peerId);
   removeTile(peerId);
 }
 
