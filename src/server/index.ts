@@ -67,8 +67,8 @@ function wireRoom(room: GameRoom): void {
   room.broadcastVotingStart = (t) =>
     io.to(room.roomId).emit('voting:start', t);
 
-  room.broadcastVoteUpdate = (votes) =>
-    io.to(room.roomId).emit('voting:update', votes);
+  room.broadcastVoteUpdate = (votes, voterMap) =>
+    io.to(room.roomId).emit('voting:update', votes, voterMap);
 
   room.broadcastResult = (id, name) =>
     io.to(room.roomId).emit('result', id, name);
@@ -161,6 +161,11 @@ io.on('connection', (socket: AppSocket) => {
   socket.on('day:vote', (targetId) => {
     if (!currentRoomId) return;
     rooms.get(currentRoomId)?.submitDayVote(socket.id, targetId);
+  });
+
+  socket.on('day:unvote', () => {
+    if (!currentRoomId) return;
+    rooms.get(currentRoomId)?.cancelDayVote(socket.id);
   });
 
   // ── Chat ──────────────────────────────────────────────────────────────────

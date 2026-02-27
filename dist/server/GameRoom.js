@@ -183,8 +183,21 @@ class GameRoom {
         }
         voter.dayVote = targetId;
         target.voteCount++;
-        this.broadcastVoteUpdate(this.publicVotes());
+        this.broadcastVoteUpdate(this.publicVotes(), this.publicVoterMap());
         this.maybeEarlyVoting();
+        return true;
+    }
+    cancelDayVote(voterId) {
+        if (this.phase !== types_1.Phase.Voting)
+            return false;
+        const voter = this.players.get(voterId);
+        if (!voter || !voter.alive || !voter.dayVote)
+            return false;
+        const prev = this.players.get(voter.dayVote);
+        if (prev)
+            prev.voteCount--;
+        voter.dayVote = null;
+        this.broadcastVoteUpdate(this.publicVotes(), this.publicVoterMap());
         return true;
     }
     maybeEarlyVoting() {
@@ -372,6 +385,14 @@ class GameRoom {
         const out = {};
         for (const p of this.alivePlayers())
             out[p.id] = p.voteCount;
+        return out;
+    }
+    publicVoterMap() {
+        const out = {};
+        for (const p of this.alivePlayers()) {
+            if (p.dayVote)
+                out[p.id] = p.dayVote;
+        }
         return out;
     }
     toPublicState() {

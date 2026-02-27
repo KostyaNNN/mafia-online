@@ -328,10 +328,17 @@ socket.on('player:role', (role, mafiaIds) => {
 socket.on('speaking:start', (speakerId, speakerName, timerEndsAt) => {
   highlightSpeaker(speakerId);
   startTimerCountdown(timerEndsAt);
+  // Auto-mute everyone except current speaker
+  if (speakerId !== socket.id) {
+    autoMicMuted = true;
+    applyMicState();
+  }
 });
 
 socket.on('speaking:your-turn', (timerEndsAt) => {
   isMyTurn = true;
+  autoMicMuted = false;
+  applyMicState();
   $('#your-turn-banner').classList.remove('hidden');
   startTimerCountdown(timerEndsAt);
   // Auto-hide after timer
@@ -343,11 +350,15 @@ socket.on('speaking:your-turn', (timerEndsAt) => {
 
 // ── Discussion start ──────────────────────────────────
 socket.on('discussion:start', (timerEndsAt) => {
+  autoMicMuted = false;
+  applyMicState();
   startTimerCountdown(timerEndsAt);
 });
 
 // ── Night ─────────────────────────────────────────────
 socket.on('night:start', (timerEndsAt) => {
+  autoMicMuted = false;
+  applyMicState();
   nightActionTarget = null;
   startTimerCountdown(timerEndsAt);
 });
@@ -366,15 +377,27 @@ socket.on('night:result', (result) => {
 });
 
 socket.on('detective:result', (targetId, targetName, isMafia) => {
-  const verdict = isMafia ? 'МАФИЯ 🔴' : 'Мирный житель 🟢';
-  addChat('🔎 Детектив', `${targetName} — ${verdict}`, 'system');
+  const verdict  = isMafia ? 'МАФИЯ 🔴' : 'Мирный житель 🟢';
+  const guessed  = isMafia ? '✅ Угадал! Это мафия!' : '❌ Не угадал — мирный житель';
+  addChat('🔎 Детектив', `${guessed} (${targetName} — ${verdict})`, 'system');
+
+  // Show prominent popup
+  const popup = $('#detective-popup');
+  const inner = popup.querySelector('.detective-popup-inner');
+  $('#detective-popup-text').textContent = `${targetName} — ${verdict}`;
+  inner.classList.remove('mafia-yes', 'mafia-no');
+  inner.classList.add(isMafia ? 'mafia-yes' : 'mafia-no');
+  popup.classList.remove('hidden');
+  clearTimeout(window._detectivePopupTimer);
+  window._detectivePopupTimer = setTimeout(() => popup.classList.add('hidden'), 7000);
+  $('#detective-popup-close').onclick = () => popup.classList.add('hidden');
 });
 
 // ── Voting ────────────────────────────────────────────
-socket.on('voting:start',  (t) => startTimerCountdown(t));
-socket.on('voting:update', (votes) => {
+socket.on('voting:start',  (t) => { autoMicMuted = false; applyMicState(); startTimerCountdown(t); });
+socket.on('voting:update', (votes, voterMap) => {
   if (roomState) roomState.dayVotes = votes;
-  updateVoteCounts(votes);
+  updateVoteCounts(votes, voterMap ?? {});
 });
 
 // ── Result ────────────────────────────────────────────
@@ -638,30 +661,76 @@ function renderVotingPanel(state) {
   const me       = state.players.find(p => p.id === socket.id);
   targets.innerHTML = '';
 
+  // Build reverse map: targetId → [voterName, ...]
+  const voterMap  = state._voterMap || {};
+  const votersByTarget = {};
+  for (const [voterId, targetId] of Object.entries(voterMap)) {
+    const vname = state.players.find(p => p.id === voterId)?.name ?? voterId;
+    (votersByTarget[targetId] = votersByTarget[targetId] || []).push(vname);
+  }
+  const myVoteTarget = voterMap[socket.id] ?? null;
+
   const alive = state.players.filter(p => p.alive && p.id !== socket.id);
   for (const p of alive) {
+    const wrap = document.createElement('div');
+    wrap.className = 'vote-candidate';
+    wrap.id        = `vote-wrap-${p.id}`;
+
     const btn = document.createElement('button');
     btn.className = 'target-btn';
     btn.id        = `vote-btn-${p.id}`;
     btn.dataset.id= p.id;
     const vcount  = state.dayVotes?.[p.id] ?? 0;
     btn.textContent = `${p.name} (${vcount} 🗳)`;
+    if (myVoteTarget === p.id) btn.classList.add('selected');
     if (!me?.alive) { btn.disabled = true; btn.classList.add('dead'); }
     btn.addEventListener('click', () => {
-      $$('#voting-targets .target-btn').forEach(b => b.classList.remove('selected'));
-      btn.classList.add('selected');
-      socket.emit('day:vote', p.id);
+      if (myVoteTarget === p.id) {
+        // cancel vote
+        socket.emit('day:unvote');
+        btn.classList.remove('selected');
+      } else {
+        $$('#voting-targets .target-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        socket.emit('day:vote', p.id);
+      }
     });
-    targets.appendChild(btn);
+    wrap.appendChild(btn);
+
+    // Voter names list
+    const vnames = document.createElement('div');
+    vnames.className = 'voter-names';
+    vnames.id        = `voter-names-${p.id}`;
+    const voters = votersByTarget[p.id] || [];
+    vnames.textContent = voters.length ? `↑ ${voters.join(', ')}` : '';
+    wrap.appendChild(vnames);
+    targets.appendChild(wrap);
   }
 }
 
-function updateVoteCounts(votes) {
+function updateVoteCounts(votes, voterMap) {
+  // Build reverse map: targetId → [voterName, ...]
+  const votersByTarget = {};
+  if (voterMap && roomState) {
+    for (const [voterId, targetId] of Object.entries(voterMap)) {
+      const vname = roomState.players.find(p => p.id === voterId)?.name ?? voterId;
+      (votersByTarget[targetId] = votersByTarget[targetId] || []).push(vname);
+    }
+    roomState._voterMap = voterMap;
+  }
+  const myVoteTarget = (voterMap && voterMap[socket.id]) ?? null;
+
   for (const [id, count] of Object.entries(votes)) {
     const btn  = document.getElementById(`vote-btn-${id}`);
     if (!btn) continue;
     const name = roomState?.players.find(p => p.id === id)?.name ?? id;
     btn.textContent = `${name} (${count} 🗳)`;
+    btn.classList.toggle('selected', myVoteTarget === id);
+    const vnEl = document.getElementById(`voter-names-${id}`);
+    if (vnEl) {
+      const voters = votersByTarget[id] || [];
+      vnEl.textContent = voters.length ? `↑ ${voters.join(', ')}` : '';
+    }
   }
 }
 
@@ -840,16 +909,32 @@ function sendChat() {
 // ═══════════════════════════════════════════════════════
 
 let gameMicMuted = false;
+let autoMicMuted = false;   // auto-muted when it's not your speaking turn
 let gameCamOff   = false;
+
+function applyMicState() {
+  const muted = gameMicMuted || autoMicMuted;
+  if (localStream) localStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+  const btn = $('#btn-game-mic');
+  if (!btn) return;
+  btn.textContent = muted ? '🔇' : '🎤';
+  btn.classList.toggle('btn-topbar-muted', muted);
+  if (autoMicMuted && !gameMicMuted) {
+    btn.title = 'Авто-выкл (нажмите чтобы включить)';
+  } else {
+    btn.title = muted ? 'Включить микрофон' : 'Выключить микрофон';
+  }
+}
 
 $('#btn-game-mic').addEventListener('click', () => {
   if (!localStream) return;
-  gameMicMuted = !gameMicMuted;
-  localStream.getAudioTracks().forEach(t => { t.enabled = !gameMicMuted; });
-  const btn = $('#btn-game-mic');
-  btn.textContent = gameMicMuted ? '🔇' : '🎤';
-  btn.classList.toggle('btn-topbar-muted', gameMicMuted);
-  btn.title = gameMicMuted ? 'Включить микрофон' : 'Выключить микрофон';
+  if (autoMicMuted && !gameMicMuted) {
+    // override auto-mute: user explicitly wants to speak
+    autoMicMuted = false;
+  } else {
+    gameMicMuted = !gameMicMuted;
+  }
+  applyMicState();
 });
 
 $('#btn-game-cam').addEventListener('click', () => {

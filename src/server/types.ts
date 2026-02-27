@@ -84,7 +84,7 @@ export interface ServerToClientEvents {
   'discussion:start':  (timerEndsAt: number) => void;
   // Voting
   'voting:start':      (timerEndsAt: number) => void;
-  'voting:update':     (votes: Record<string, number>) => void;
+  'voting:update':     (votes: Record<string, number>, voterMap: Record<string, string>) => void;
   // Result
   'result':            (eliminated: string | null, eliminatedName: string | null) => void;
   // Game Over
@@ -108,6 +108,7 @@ export interface ClientToServerEvents {
   'speaking:done': () => void;   // speaker finishes early
   'night:action':  (targetId: string) => void;
   'day:vote':      (targetId: string) => void;
+  'day:unvote':    () => void;
   'chat:send':     (text: string) => void;
   'rtc:offer':     (toId: string, offer: SdpInit) => void;
   'rtc:answer':    (toId: string, answer: SdpInit) => void;

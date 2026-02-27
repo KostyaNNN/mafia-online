@@ -35,7 +35,7 @@ export class GameRoom {
   sendDetectiveResult!:   (detectiveId: string, targetId: string, targetName: string, isMafia: boolean) => void;
   broadcastDiscussionStart!: (timerEndsAt: number) => void;
   broadcastVotingStart!:  (timerEndsAt: number) => void;
-  broadcastVoteUpdate!:   (votes: Record<string, number>) => void;
+  broadcastVoteUpdate!:   (votes: Record<string, number>, voterMap: Record<string, string>) => void;
   broadcastResult!:       (eliminatedId: string | null, eliminatedName: string | null) => void;
   broadcastGameOver!:     (winner: 'mafia' | 'city', reason: string) => void;
   broadcastNightStart!:   (timerEndsAt: number) => void;
@@ -213,8 +213,19 @@ export class GameRoom {
     }
     voter.dayVote = targetId;
     target.voteCount++;
-    this.broadcastVoteUpdate(this.publicVotes());
+    this.broadcastVoteUpdate(this.publicVotes(), this.publicVoterMap());
     this.maybeEarlyVoting();
+    return true;
+  }
+
+  cancelDayVote(voterId: string): boolean {
+    if (this.phase !== Phase.Voting) return false;
+    const voter = this.players.get(voterId);
+    if (!voter || !voter.alive || !voter.dayVote) return false;
+    const prev = this.players.get(voter.dayVote);
+    if (prev) prev.voteCount--;
+    voter.dayVote = null;
+    this.broadcastVoteUpdate(this.publicVotes(), this.publicVoterMap());
     return true;
   }
 
@@ -408,6 +419,14 @@ export class GameRoom {
   publicVotes(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const p of this.alivePlayers()) out[p.id] = p.voteCount;
+    return out;
+  }
+
+  publicVoterMap(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const p of this.alivePlayers()) {
+      if (p.dayVote) out[p.id] = p.dayVote;
+    }
     return out;
   }
 

@@ -45,7 +45,7 @@ function wireRoom(room) {
     room.sendYourTurn = (speakerId, t) => io.to(speakerId).emit('speaking:your-turn', t);
     room.broadcastDiscussionStart = (t) => io.to(room.roomId).emit('discussion:start', t);
     room.broadcastVotingStart = (t) => io.to(room.roomId).emit('voting:start', t);
-    room.broadcastVoteUpdate = (votes) => io.to(room.roomId).emit('voting:update', votes);
+    room.broadcastVoteUpdate = (votes, voterMap) => io.to(room.roomId).emit('voting:update', votes, voterMap);
     room.broadcastResult = (id, name) => io.to(room.roomId).emit('result', id, name);
     room.broadcastGameOver = (winner, reason) => io.to(room.roomId).emit('gameover', winner, reason);
     room.broadcastSystem = (text) => io.to(room.roomId).emit('chat:message', '⚙️ Сервер', text, 'system');
@@ -134,6 +134,11 @@ io.on('connection', (socket) => {
         if (!currentRoomId)
             return;
         rooms.get(currentRoomId)?.submitDayVote(socket.id, targetId);
+    });
+    socket.on('day:unvote', () => {
+        if (!currentRoomId)
+            return;
+        rooms.get(currentRoomId)?.cancelDayVote(socket.id);
     });
     // ── Chat ──────────────────────────────────────────────────────────────────
     socket.on('chat:send', (rawText) => {
