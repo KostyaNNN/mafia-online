@@ -36,6 +36,14 @@ const iceBuffer   = new Map();   // peerId → RTCIceCandidateInit[] (buffered b
 const $  = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 
+// Cleanup on page close
+window.addEventListener('beforeunload', () => {
+  for (const [, pc] of peers) {
+    pc.close();
+  }
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+});
+
 function showScreen(name) {
   $$('.screen').forEach(s => s.classList.remove('active'));
   $(`#screen-${name}`).classList.add('active');
@@ -189,11 +197,29 @@ async function startLocalMedia() {
     startAudioMeter(localStream, 'lobby-audio-bar', 'lobby-audio-meter-wrap');
 
     // Add tracks to any PCs that were created before localStream was ready
-    for (const [, pc] of peers) {
+    // Wait a bit to ensure PCs are in stable state
+    await new Promise(r => setTimeout(r, 200));
+    
+    for (const [peerId, pc] of peers) {
+      if (pc.connectionState === 'closed') continue;
       const senders = pc.getSenders();
+      let added = false;
       localStream.getTracks().forEach(t => {
-        if (!senders.find(s => s.track === t)) pc.addTrack(t, localStream);
+        if (!senders.find(s => s.track === t)) {
+          pc.addTrack(t, localStream);
+          added = true;
+        }
       });
+      // Renegotiate if we added tracks
+      if (added && socket.id < peerId) {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socket.emit('rtc:offer', peerId, { type: offer.type, sdp: offer.sdp });
+        } catch (err) {
+          console.error('Renegotiation failed:', err);
+        }
+      }
     }
   }
 }
@@ -202,12 +228,24 @@ async function startLocalMedia() {
 //  JOIN SCREEN
 // ═══════════════════════════════════════════════════════
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   const p = new URLSearchParams(location.search).get('room');
   if (p) $('#inp-room').value = p.toUpperCase();
   ['#inp-name','#inp-room'].forEach(s =>
     $(s).addEventListener('keyup', e => { if (e.key === 'Enter') $('#btn-join').click(); })
   );
+
+  // Auto-rejoin if we were in a room before refresh
+  const savedRoom = localStorage.getItem('mafia-room');
+  const savedName = localStorage.getItem('mafia-name');
+  if (savedRoom && savedName) {
+    myName = savedName;
+    // Start media first
+    await startLocalMedia();
+    // Then rejoin
+    socket.emit('room:join', savedRoom, savedName);
+    console.log('Auto-rejoining room:', savedRoom);
+  }
 });
 
 $('#btn-join').addEventListener('click', async () => {
@@ -217,6 +255,11 @@ $('#btn-join').addEventListener('click', async () => {
   if (!roomId) roomId = Math.random().toString(36).slice(2, 7).toUpperCase();
 
   myName = name;
+  
+  // Save to localStorage for auto-rejoin on refresh
+  localStorage.setItem('mafia-room', roomId);
+  localStorage.setItem('mafia-name', name);
+  
   const url = new URL(location.href);
   url.searchParams.set('room', roomId);
   history.replaceState({}, '', url.toString());
@@ -267,6 +310,14 @@ $('#btn-ready').addEventListener('click', () => {
 
 $('#btn-start').addEventListener('click', () => socket.emit('game:start'));
 
+$('#btn-leave-lobby').addEventListener('click', () => {
+  // Clear saved room data
+  localStorage.removeItem('mafia-room');
+  localStorage.removeItem('mafia-name');
+  // Disconnect and reload to join screen
+  location.reload();
+});
+
 $('#btn-copy-link').addEventListener('click', () => {
   const url = new URL(location.href);
   if (roomState) url.searchParams.set('room', roomState.roomId);
@@ -280,7 +331,32 @@ $('#btn-copy-link').addEventListener('click', () => {
 //  SOCKET EVENTS
 // ═══════════════════════════════════════════════════════
 
-socket.on('connect', () => { myId = socket.id; });
+socket.on('connect', () => { 
+  myId = socket.id;
+  console.log('Connected:', socket.id);
+});
+
+socket.on('disconnect', () => {
+  console.log('Disconnected from server');
+});
+
+socket.on('reconnect', () => {
+  console.log('Reconnected to server');
+  // All peer connections are likely stale, close them
+  for (const [peerId, pc] of peers) {
+    pc.close();
+  }
+  peers.clear();
+  iceBuffer.clear();
+  
+  // Auto-rejoin room if we were in one
+  const savedRoom = localStorage.getItem('mafia-room');
+  const savedName = localStorage.getItem('mafia-name');
+  if (savedRoom && savedName && myName) {
+    socket.emit('room:join', savedRoom, savedName);
+    console.log('Re-joining room after reconnect:', savedRoom);
+  }
+});
 
 socket.on('error', (msg) => {
   showErr('join-error', msg);
@@ -298,12 +374,23 @@ socket.on('room:state', (state) => {
     peerNames.set(p.id, p.name);
     addVideoTile(p.id, p.name, p.id === socket.id, p.joinIndex);
   }
-  // Remove tiles for players no longer in the room
+  
+  // Remove tiles and close connections for players no longer in the room
   const knownIds = new Set(state.players.map(p => p.id));
   $$('.video-tile').forEach(tile => {
     const id = tile.id.replace('tile-', '');
-    if (id && !knownIds.has(id)) tile.remove();
+    if (id && !knownIds.has(id)) {
+      tile.remove();
+      // Clean up peer connection if it exists
+      if (peers.has(id)) {
+        peers.get(id)?.close();
+        peers.delete(id);
+        iceBuffer.delete(id);
+        peerNames.delete(id);
+      }
+    }
   });
+  
   // Sort all tiles in DOM by joinIndex
   sortTilesByJoinIndex();
 
@@ -460,7 +547,12 @@ socket.on('rtc:peer-joined', async (peerId, peerName) => {
   // joinIndex will be set properly on next room:state; use 999 as temp placeholder
   const existingTile = document.getElementById(`tile-${peerId}`);
   if (!existingTile) addVideoTile(peerId, peerName, false, 999);
-  if (myId < peerId) await callPeer(peerId);
+  // Only the peer with the lower ID initiates the call to avoid duplicate connections
+  if (socket.id && socket.id < peerId) {
+    // Small delay to ensure both sides are ready
+    await new Promise(r => setTimeout(r, 100));
+    if (!peers.has(peerId)) await callPeer(peerId);
+  }
 });
 
 socket.on('rtc:peer-left', (peerId) => {
@@ -469,19 +561,45 @@ socket.on('rtc:peer-left', (peerId) => {
 });
 
 socket.on('rtc:offer', async (fromId, offer) => {
-  const pc = createPC(fromId);
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  await flushIceBuffer(fromId);
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  socket.emit('rtc:answer', fromId, { type: answer.type, sdp: answer.sdp });
+  try {
+    const existingPC = peers.get(fromId);
+    // Handle glare: if both peers send offer simultaneously, lower ID wins
+    if (existingPC && existingPC.signalingState !== 'stable') {
+      if (socket.id < fromId) {
+        // We are polite peer, accept the incoming offer
+        await existingPC.setRemoteDescription(new RTCSessionDescription(offer));
+      } else {
+        // Ignore incoming offer, our offer takes precedence
+        return;
+      }
+    } else {
+      const pc = createPC(fromId);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    }
+    await flushIceBuffer(fromId);
+    const pc = peers.get(fromId);
+    if (!pc) return;
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('rtc:answer', fromId, { type: answer.type, sdp: answer.sdp });
+  } catch (err) {
+    console.error('rtc:offer error:', err);
+  }
 });
 
 socket.on('rtc:answer', async (fromId, answer) => {
-  const pc = peers.get(fromId);
-  if (!pc) return;
-  await pc.setRemoteDescription(new RTCSessionDescription(answer));
-  await flushIceBuffer(fromId);
+  try {
+    const pc = peers.get(fromId);
+    if (!pc) return;
+    if (pc.signalingState !== 'have-local-offer') {
+      console.warn('Received answer in wrong state:', pc.signalingState);
+      return;
+    }
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    await flushIceBuffer(fromId);
+  } catch (err) {
+    console.error('rtc:answer error:', err);
+  }
 });
 
 socket.on('rtc:ice', async (fromId, candidate) => {
@@ -493,7 +611,12 @@ socket.on('rtc:ice', async (fromId, candidate) => {
     iceBuffer.set(fromId, buf);
     return;
   }
-  try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  } catch (err) {
+    // Ignore errors for stale candidates
+    if (err.name !== 'OperationError') console.error('ICE error:', err);
+  }
 });
 
 // ═══════════════════════════════════════════════════════
@@ -503,10 +626,17 @@ socket.on('rtc:ice', async (fromId, candidate) => {
 async function flushIceBuffer(peerId) {
   const pc   = peers.get(peerId);
   const bufs = iceBuffer.get(peerId);
-  if (!pc || !bufs) return;
+  if (!pc || !bufs || bufs.length === 0) return;
   iceBuffer.delete(peerId);
   for (const c of bufs) {
-    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch (_) {}
+    try {
+      if (pc.connectionState !== 'closed') {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      }
+    } catch (err) {
+      // Ignore errors for stale candidates
+      if (err.name !== 'OperationError') console.error('ICE buffer flush error:', err);
+    }
   }
 }
 
@@ -515,27 +645,63 @@ function createPC(peerId) {
   const pc = new RTCPeerConnection(STUN);
   peers.set(peerId, pc);
   if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-  pc.ontrack = (e) => { if (e.streams[0]) setTileStream(peerId, e.streams[0]); };
+  
+  pc.ontrack = (e) => {
+    if (e.streams[0]) {
+      const tile = document.getElementById(`tile-${peerId}`);
+      const vid = tile?.querySelector('video');
+      // Only update if stream changed or not set
+      if (vid && vid.srcObject !== e.streams[0]) {
+        setTileStream(peerId, e.streams[0]);
+      }
+    }
+  };
+  
   pc.onicecandidate = (e) => {
     if (e.candidate) socket.emit('rtc:ice', peerId, e.candidate.toJSON());
   };
+  
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed') {
+      console.log('ICE failed for', peerId, '- restarting...');
+      pc.restartIce();
+    }
+  };
+  
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed') {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      const wasConnected = pc.connectionState === 'disconnected';
       pc.close();
       peers.delete(peerId);
       iceBuffer.delete(peerId);
-      // retry call if we are the designated initiator
-      if (myId < peerId) setTimeout(() => callPeer(peerId), 1000);
+      // retry call if we are the designated initiator, and connection existed
+      if (socket.id && socket.id < peerId) {
+        const delay = wasConnected ? 2000 : 3000;
+        setTimeout(() => {
+          // Only retry if peer still exists and we don't have an active connection
+          if (peerNames.has(peerId) && !peers.has(peerId)) {
+            callPeer(peerId).catch(() => {});
+          }
+        }, delay);
+      }
     }
   };
   return pc;
 }
 
 async function callPeer(peerId) {
-  const pc    = createPC(peerId);
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  socket.emit('rtc:offer', peerId, { type: offer.type, sdp: offer.sdp });
+  // Don't create duplicate connections
+  if (peers.has(peerId)) return;
+  const pc = createPC(peerId);
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('rtc:offer', peerId, { type: offer.type, sdp: offer.sdp });
+  } catch (err) {
+    console.error('callPeer failed:', err);
+    peers.delete(peerId);
+    iceBuffer.delete(peerId);
+  }
 }
 
 function closePeer(peerId) {
