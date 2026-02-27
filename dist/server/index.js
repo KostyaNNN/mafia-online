@@ -9,105 +9,87 @@ const path_1 = __importDefault(require("path"));
 const socket_io_1 = require("socket.io");
 const GameRoom_1 = require("./GameRoom");
 const types_1 = require("./types");
-// ─── Setup ───────────────────────────────────────────────────────────────────
+// ─── Setup ────────────────────────────────────────────────────────────────────
 const app = (0, express_1.default)();
 const server = http_1.default.createServer(app);
 const io = new socket_io_1.Server(server, {
     cors: { origin: '*' },
 });
 const PORT = process.env.PORT ?? 3000;
-// Serve static files from /public
 app.use(express_1.default.static(path_1.default.join(__dirname, '..', '..', 'public')));
-// SPA fallback — serve index.html for unknown routes
 app.get('*', (_req, res) => {
     res.sendFile(path_1.default.join(__dirname, '..', '..', 'public', 'index.html'));
 });
-// ─── In-memory rooms ───────────────────────────────────────────────────────
+// ─── Rooms ────────────────────────────────────────────────────────────────────
 const rooms = new Map();
 function getOrCreateRoom(roomId) {
     if (!rooms.has(roomId))
         rooms.set(roomId, new GameRoom_1.GameRoom(roomId));
     return rooms.get(roomId);
 }
+// ─── Wire callbacks ───────────────────────────────────────────────────────────
 function wireRoom(room) {
-    // Broadcast full state to all players in the room
-    room.broadcastState = () => {
-        const state = room.toPublicState();
-        io.to(room.roomId).emit('room:state', state);
-    };
-    // Send each player their role privately
+    room.broadcastState = () => io.to(room.roomId).emit('room:state', room.toPublicState());
     room.sendRoles = () => {
         const mafiaIds = room.getMafiaIds();
-        for (const player of room.getPlayers()) {
-            if (player.role === null)
+        for (const p of room.getPlayers()) {
+            if (!p.role)
                 continue;
-            const personalMafiaIds = player.role === types_1.Role.Mafia ? mafiaIds : [];
-            io.to(player.id).emit('player:role', player.role, personalMafiaIds);
+            io.to(p.id).emit('player:role', p.role, p.role === types_1.Role.Mafia ? mafiaIds : []);
         }
     };
-    room.broadcastNightStart = (timerEndsAt) => {
-        io.to(room.roomId).emit('night:start', timerEndsAt);
-    };
-    room.broadcastNightResult = (pub) => {
-        io.to(room.roomId).emit('night:result', pub);
-    };
-    room.sendDetectiveResult = (detectiveId, targetId, targetName, isMafia) => {
-        io.to(detectiveId).emit('detective:result', targetId, targetName, isMafia);
-    };
-    room.broadcastDayStart = (timerEndsAt) => {
-        io.to(room.roomId).emit('day:start', timerEndsAt);
-    };
-    room.broadcastVotingStart = (timerEndsAt) => {
-        io.to(room.roomId).emit('voting:start', timerEndsAt);
-    };
-    room.broadcastVoteUpdate = (votes) => {
-        io.to(room.roomId).emit('voting:update', votes);
-    };
-    room.broadcastResult = (eliminatedId, eliminatedName) => {
-        io.to(room.roomId).emit('result', eliminatedId, eliminatedName);
-    };
-    room.broadcastGameOver = (winner, reason) => {
-        io.to(room.roomId).emit('gameover', winner, reason);
-    };
+    room.broadcastNightStart = (t) => io.to(room.roomId).emit('night:start', t);
+    room.broadcastNightResult = (pub) => io.to(room.roomId).emit('night:result', pub);
+    room.sendDetectiveResult = (detectiveId, targetId, targetName, isMafia) => io.to(detectiveId).emit('detective:result', targetId, targetName, isMafia);
+    room.broadcastSpeakingStart = (speakerId, speakerName, t) => io.to(room.roomId).emit('speaking:start', speakerId, speakerName, t);
+    room.sendYourTurn = (speakerId, t) => io.to(speakerId).emit('speaking:your-turn', t);
+    room.broadcastDiscussionStart = (t) => io.to(room.roomId).emit('discussion:start', t);
+    room.broadcastVotingStart = (t) => io.to(room.roomId).emit('voting:start', t);
+    room.broadcastVoteUpdate = (votes) => io.to(room.roomId).emit('voting:update', votes);
+    room.broadcastResult = (id, name) => io.to(room.roomId).emit('result', id, name);
+    room.broadcastGameOver = (winner, reason) => io.to(room.roomId).emit('gameover', winner, reason);
+    room.broadcastSystem = (text) => io.to(room.roomId).emit('chat:message', '⚙️ Сервер', text, 'system');
 }
-// ─── Socket.IO event handlers ─────────────────────────────────────────────
 io.on('connection', (socket) => {
     let currentRoomId = null;
     let currentName = '';
-    // ── Join room ──────────────────────────────────────────────────────────
-    socket.on('room:join', (roomId, playerName) => {
+    // ── Join ──────────────────────────────────────────────────────────────────
+    socket.on('room:join', async (roomId, playerName) => {
         roomId = roomId.trim().toUpperCase();
         playerName = playerName.trim().slice(0, 24);
         if (!roomId || !playerName) {
-            socket.emit('error', 'Некорректный ID комнаты или имя.');
+            socket.emit('error', 'Введите имя и код комнаты.');
             return;
         }
         const room = getOrCreateRoom(roomId);
         if (room.size() >= 10) {
-            socket.emit('error', 'Комната заполнена (максимум 10 игроков).');
+            socket.emit('error', 'Комната заполнена (максимум 10).');
             return;
         }
-        if (room.getPhase() !== types_1.Phase.Lobby && room.getPhase() !== types_1.Phase.GameOver) {
-            socket.emit('error', 'Игра уже идёт. Подождите следующий раунд.');
+        const activePhases = [types_1.Phase.Speaking, types_1.Phase.Discussion, types_1.Phase.Voting, types_1.Phase.Night, types_1.Phase.NightResult];
+        if (activePhases.includes(room.getPhase())) {
+            socket.emit('error', 'Игра уже идёт. Дождитесь следующего раунда.');
             return;
         }
-        // Leave previous room if any
-        if (currentRoomId) {
+        if (currentRoomId)
             leaveRoom(socket, currentRoomId);
-        }
         currentRoomId = roomId;
         currentName = playerName;
         socket.join(roomId);
         wireRoom(room);
         room.addPlayer(socket.id, playerName);
-        // Tell new player the current state
         socket.emit('room:state', room.toPublicState());
-        // Tell everyone else a new peer joined (for WebRTC)
+        // Tell existing players about the newcomer
         socket.to(roomId).emit('rtc:peer-joined', socket.id, playerName);
-        // Broadcast updated state
+        // Tell the newcomer about every player already in the room
+        for (const p of room.getPlayers()) {
+            if (p.id !== socket.id) {
+                socket.emit('rtc:peer-joined', p.id, p.name);
+            }
+        }
         room.broadcastState();
     });
-    // ── Ready toggle ───────────────────────────────────────────────────────
+    // ── Ready ─────────────────────────────────────────────────────────────────
     socket.on('player:ready', (ready) => {
         if (!currentRoomId)
             return;
@@ -117,7 +99,7 @@ io.on('connection', (socket) => {
         room.setReady(socket.id, ready);
         room.broadcastState();
     });
-    // ── Host starts game ───────────────────────────────────────────────────
+    // ── Start ─────────────────────────────────────────────────────────────────
     socket.on('game:start', () => {
         if (!currentRoomId)
             return;
@@ -135,26 +117,26 @@ io.on('connection', (socket) => {
         }
         room.startGame();
     });
-    // ── Night action ───────────────────────────────────────────────────────
+    // ── Speaking done ─────────────────────────────────────────────────────────
+    socket.on('speaking:done', () => {
+        if (!currentRoomId)
+            return;
+        rooms.get(currentRoomId)?.speakerDone(socket.id);
+    });
+    // ── Night action ──────────────────────────────────────────────────────────
     socket.on('night:action', (targetId) => {
         if (!currentRoomId)
             return;
-        const room = rooms.get(currentRoomId);
-        if (!room)
-            return;
-        room.submitNightAction(socket.id, targetId);
+        rooms.get(currentRoomId)?.submitNightAction(socket.id, targetId);
     });
-    // ── Day vote ───────────────────────────────────────────────────────────
+    // ── Day vote ──────────────────────────────────────────────────────────────
     socket.on('day:vote', (targetId) => {
         if (!currentRoomId)
             return;
-        const room = rooms.get(currentRoomId);
-        if (!room)
-            return;
-        room.submitDayVote(socket.id, targetId);
+        rooms.get(currentRoomId)?.submitDayVote(socket.id, targetId);
     });
-    // ── Chat ───────────────────────────────────────────────────────────────
-    socket.on('chat:send', (text) => {
+    // ── Chat ──────────────────────────────────────────────────────────────────
+    socket.on('chat:send', (rawText) => {
         if (!currentRoomId)
             return;
         const room = rooms.get(currentRoomId);
@@ -163,61 +145,57 @@ io.on('connection', (socket) => {
         const player = room.getPlayer(socket.id);
         if (!player)
             return;
-        text = text.trim().slice(0, 300);
+        const text = rawText.trim().slice(0, 300);
         if (!text)
             return;
         const phase = room.getPhase();
-        // Mafia team chat during night (only visible to mafia members)
+        // Night: only mafia talk to each other
         if (phase === types_1.Phase.Night) {
             if (player.role === types_1.Role.Mafia) {
-                const mafiaIds = room.getMafiaIds();
-                for (const id of mafiaIds) {
-                    io.to(id).emit('chat:message', player.name, text, true);
-                }
+                for (const id of room.getMafiaIds())
+                    io.to(id).emit('chat:message', player.name, text, 'mafia');
             }
             return;
         }
-        // Day / Voting — broadcast to all alive players (dead players can spectate)
-        if (phase === types_1.Phase.Day || phase === types_1.Phase.Voting) {
-            if (!player.alive)
-                return; // dead can't speak
-            io.to(currentRoomId).emit('chat:message', player.name, text, false);
+        // Speaking: only the current speaker can write
+        if (phase === types_1.Phase.Speaking) {
+            const state = room.toPublicState();
+            const speakerId = state.speakingOrder[state.currentSpeakerIdx];
+            if (player.id !== speakerId) {
+                socket.emit('error', 'Сейчас не ваша очередь говорить.');
+                return;
+            }
+        }
+        // Discussion / Voting / Speaking — alive players only
+        if ([types_1.Phase.Speaking, types_1.Phase.Discussion, types_1.Phase.Voting].includes(phase)) {
+            if (!player.alive) {
+                socket.emit('error', 'Выбывшие игроки не могут говорить.');
+                return;
+            }
+            io.to(currentRoomId).emit('chat:message', player.name, text, 'normal');
         }
     });
-    // ── WebRTC signaling ───────────────────────────────────────────────────
-    socket.on('rtc:offer', (toId, offer) => {
-        io.to(toId).emit('rtc:offer', socket.id, offer);
-    });
-    socket.on('rtc:answer', (toId, answer) => {
-        io.to(toId).emit('rtc:answer', socket.id, answer);
-    });
-    socket.on('rtc:ice', (toId, candidate) => {
-        io.to(toId).emit('rtc:ice', socket.id, candidate);
-    });
-    // ── Disconnect ─────────────────────────────────────────────────────────
+    // ── WebRTC signaling ──────────────────────────────────────────────────────
+    socket.on('rtc:offer', (toId, offer) => io.to(toId).emit('rtc:offer', socket.id, offer));
+    socket.on('rtc:answer', (toId, answer) => io.to(toId).emit('rtc:answer', socket.id, answer));
+    socket.on('rtc:ice', (toId, candidate) => io.to(toId).emit('rtc:ice', socket.id, candidate));
+    // ── Disconnect ────────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
-        if (currentRoomId) {
+        if (currentRoomId)
             leaveRoom(socket, currentRoomId);
-        }
     });
-    // ─── Helper: leave room ────────────────────────────────────────────────
     function leaveRoom(sock, roomId) {
         const room = rooms.get(roomId);
         if (!room)
             return;
         room.removePlayer(sock.id);
         sock.leave(roomId);
-        // Notify peers for WebRTC cleanup
         sock.to(roomId).emit('rtc:peer-left', sock.id);
-        if (room.isEmpty()) {
+        if (room.isEmpty())
             rooms.delete(roomId);
-        }
-        else {
+        else
             room.broadcastState();
-        }
     }
 });
-// ─── Start ───────────────────────────────────────────────────────────────────
-server.listen(PORT, () => {
-    console.log(`✅  Mafia server running at http://localhost:${PORT}`);
-});
+// ─── Start ────────────────────────────────────────────────────────────────────
+server.listen(PORT, () => console.log(`✅  Mafia server → http://localhost:${PORT}`));

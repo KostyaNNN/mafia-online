@@ -1,69 +1,47 @@
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 export enum Role {
-  Civilian  = 'civilian',
-  Mafia     = 'mafia',
-  Detective = 'detective',
-  Doctor    = 'doctor',
-  Prostitute= 'prostitute',
+  Civilian   = 'civilian',
+  Mafia      = 'mafia',
+  Detective  = 'detective',
+  Doctor     = 'doctor',
+  Prostitute = 'prostitute',
 }
 
 export enum Phase {
-  Lobby   = 'lobby',
-  Night   = 'night',
-  Day     = 'day',
-  Voting  = 'voting',
-  Result  = 'result',
-  GameOver= 'gameover',
+  Lobby      = 'lobby',
+  Speaking   = 'speaking',     // round-robin: each player 30s
+  Discussion = 'discussion',   // free chat 60s
+  Voting     = 'voting',       // vote someone out 45s
+  NightResult= 'nightresult',  // show night kill result 8s
+  Night      = 'night',        // secret actions 60s
+  GameOver   = 'gameover',
 }
 
 // ─── Player ──────────────────────────────────────────────────────────────────
 
 export interface Player {
-  id:        string;   // socket.id
-  name:      string;
-  roomId:    string;
-  role:      Role | null;
-  alive:     boolean;
-  ready:     boolean;
-  // night action target
+  id:          string;
+  name:        string;
+  roomId:      string;
+  joinIndex:   number;   // stable insertion order (0-based)
+  role:        Role | null;
+  alive:       boolean;
+  ready:       boolean;
   nightTarget: string | null;
-  // whether this player is blocked by prostitute this night
-  blocked: boolean;
-  // whether this player was voted against (day vote count)
-  voteCount: number;
-  // who this player cast day-vote for
-  dayVote: string | null;
+  blocked:     boolean;
+  voteCount:   number;
+  dayVote:     string | null;
 }
 
-// ─── Night Result ────────────────────────────────────────────────────────────
-
-export interface NightResult {
-  killed:   string | null;   // player id
-  healed:   boolean;
-  checked:  { targetId: string; isMafia: boolean } | null;
-  blocked:  string | null;   // player id who was blocked
-}
-
-// ─── Room State (sent to clients, with role hidden) ──────────────────────────
+// ─── Room State ───────────────────────────────────────────────────────────────
 
 export interface PublicPlayer {
-  id:    string;
-  name:  string;
-  alive: boolean;
-  ready: boolean;
-}
-
-export interface RoomState {
-  roomId:      string;
-  phase:       Phase;
-  players:     PublicPlayer[];
-  round:       number;
-  timerEndsAt: number;   // epoch ms
-  nightResult: NightResultPublic | null;
-  dayVotes:    Record<string, number>;   // playerId → count (revealed during voting)
-  winner:      'mafia' | 'city' | null;
-  hostId:      string;
+  id:        string;
+  name:      string;
+  alive:     boolean;
+  ready:     boolean;
+  joinIndex: number;   // stable insertion order (0-based)
 }
 
 export interface NightResultPublic {
@@ -71,53 +49,67 @@ export interface NightResultPublic {
   healed:     boolean;
 }
 
-// Generic SDP / ICE objects (avoid browser-only types in Node.js context)
-export interface SdpInit   { type: string; sdp: string }
-export interface IceInit   { candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null }
+export interface RoomState {
+  roomId:            string;
+  phase:             Phase;
+  players:           PublicPlayer[];
+  round:             number;
+  timerEndsAt:       number;
+  nightResult:       NightResultPublic | null;
+  dayVotes:          Record<string, number>;
+  winner:            'mafia' | 'city' | null;
+  hostId:            string;
+  speakingOrder:     string[];    // player IDs in speech order
+  currentSpeakerIdx: number;      // index into speakingOrder; -1 = N/A
+}
 
-// ─── Socket Events (server → client) ─────────────────────────────────────────
+// ─── SDP / ICE (plain, not browser-only) ─────────────────────────────────────
+
+export interface SdpInit { type: string; sdp: string }
+export interface IceInit { candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null }
+
+// ─── Socket Events ────────────────────────────────────────────────────────────
 
 export interface ServerToClientEvents {
-  // Room / lobby
-  'room:state':         (state: RoomState) => void;
-  'player:role':        (role: Role, mafiaIds: string[]) => void;
+  'room:state':        (state: RoomState) => void;
+  'player:role':       (role: Role, mafiaIds: string[]) => void;
   // Night
-  'night:start':        (timerEndsAt: number) => void;
-  'night:result':       (result: NightResultPublic) => void;
-  'detective:result':   (targetId: string, targetName: string, isMafia: boolean) => void;
-  // Day / voting
-  'day:start':          (timerEndsAt: number) => void;
-  'voting:start':       (timerEndsAt: number) => void;
-  'voting:update':      (votes: Record<string, number>) => void;
+  'night:start':       (timerEndsAt: number) => void;
+  'night:result':      (result: NightResultPublic) => void;
+  'detective:result':  (targetId: string, targetName: string, isMafia: boolean) => void;
+  // Speaking
+  'speaking:your-turn':(timerEndsAt: number) => void;
+  'speaking:start':    (speakerId: string, speakerName: string, timerEndsAt: number) => void;
+  // Discussion
+  'discussion:start':  (timerEndsAt: number) => void;
+  // Voting
+  'voting:start':      (timerEndsAt: number) => void;
+  'voting:update':     (votes: Record<string, number>) => void;
   // Result
-  'result':             (eliminated: string | null, eliminatedName: string | null) => void;
-  // Game over
-  'gameover':           (winner: 'mafia' | 'city', reason: string) => void;
-  // Chat
-  'chat:message':       (from: string, text: string, isMafia: boolean) => void;
-  // Errors
-  'error':              (msg: string) => void;
-  // WebRTC signaling
-  'rtc:offer':          (fromId: string, offer: SdpInit) => void;
-  'rtc:answer':         (fromId: string, answer: SdpInit) => void;
-  'rtc:ice':            (fromId: string, candidate: IceInit) => void;
-  'rtc:peer-joined':    (peerId: string, peerName: string) => void;
-  'rtc:peer-left':      (peerId: string) => void;
+  'result':            (eliminated: string | null, eliminatedName: string | null) => void;
+  // Game Over
+  'gameover':          (winner: 'mafia' | 'city', reason: string) => void;
+  // Chat — tag: 'mafia'=mafia chat | 'system'=server message | 'normal'=day chat
+  'chat:message':      (from: string, text: string, tag: 'mafia' | 'system' | 'normal') => void;
+  // Error
+  'error':             (msg: string) => void;
+  // WebRTC
+  'rtc:offer':         (fromId: string, offer: SdpInit) => void;
+  'rtc:answer':        (fromId: string, answer: SdpInit) => void;
+  'rtc:ice':           (fromId: string, candidate: IceInit) => void;
+  'rtc:peer-joined':   (peerId: string, peerName: string) => void;
+  'rtc:peer-left':     (peerId: string) => void;
 }
 
 export interface ClientToServerEvents {
-  // Lobby
-  'room:join':    (roomId: string, playerName: string) => void;
-  'player:ready': (ready: boolean) => void;
-  'game:start':   () => void;
-  // Night actions
-  'night:action': (targetId: string) => void;
-  // Day vote
-  'day:vote':     (targetId: string) => void;
-  // Chat
-  'chat:send':    (text: string) => void;
-  // WebRTC signaling
-  'rtc:offer':    (toId: string, offer: SdpInit) => void;
-  'rtc:answer':   (toId: string, answer: SdpInit) => void;
-  'rtc:ice':      (toId: string, candidate: IceInit) => void;
+  'room:join':     (roomId: string, playerName: string) => void;
+  'player:ready':  (ready: boolean) => void;
+  'game:start':    () => void;
+  'speaking:done': () => void;   // speaker finishes early
+  'night:action':  (targetId: string) => void;
+  'day:vote':      (targetId: string) => void;
+  'chat:send':     (text: string) => void;
+  'rtc:offer':     (toId: string, offer: SdpInit) => void;
+  'rtc:answer':    (toId: string, answer: SdpInit) => void;
+  'rtc:ice':       (toId: string, candidate: IceInit) => void;
 }

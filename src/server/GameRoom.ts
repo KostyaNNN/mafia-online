@@ -1,54 +1,60 @@
-import { v4 as uuidv4 } from 'uuid';
 import {
   Player, Role, Phase,
-  NightResult, NightResultPublic, RoomState, PublicPlayer,
+  NightResultPublic, RoomState, PublicPlayer,
 } from './types';
 
 // ─── Timers (ms) ─────────────────────────────────────────────────────────────
-const TIMER_NIGHT   = 60_000;
-const TIMER_DAY     = 90_000;
-const TIMER_VOTING  = 45_000;
-const TIMER_RESULT  = 8_000;
+const TIMER_SPEECH      = 30_000;   // per-player speech
+const TIMER_DISCUSSION  = 60_000;   // free chat after speeches
+const TIMER_VOTING      = 45_000;
+const TIMER_NIGHT       = 60_000;
+const TIMER_RESULT      =  8_000;   // night-result display
 
 // ─── GameRoom ────────────────────────────────────────────────────────────────
 
 export class GameRoom {
   readonly roomId: string;
-  private players: Map<string, Player> = new Map();
-  private phase: Phase = Phase.Lobby;
-  private round  = 0;
+  private players:    Map<string, Player> = new Map();
+  private phase:      Phase  = Phase.Lobby;
+  private round:      number = 0;
   private timerHandle: ReturnType<typeof setTimeout> | null = null;
-  private timerEndsAt = 0;
+  private timerEndsAt: number = 0;
   private lastNightResult: NightResultPublic | null = null;
-  private winner: 'mafia' | 'city' | null = null;
-  private hostId = '';
+  private winner:     'mafia' | 'city' | null = null;
+  private hostId:     string = '';
 
-  // Callbacks injected by socket handler
-  broadcastState!: () => void;
-  sendRoles!:      () => void;
-  broadcastNightResult!: (pub: NightResultPublic) => void;
-  sendDetectiveResult!: (detectiveId: string, targetId: string, targetName: string, isMafia: boolean) => void;
-  broadcastDayStart!:   (timerEndsAt: number) => void;
-  broadcastVotingStart!:(timerEndsAt: number) => void;
-  broadcastVoteUpdate!: (votes: Record<string, number>) => void;
-  broadcastResult!:     (eliminatedId: string | null, eliminatedName: string | null) => void;
-  broadcastGameOver!:   (winner: 'mafia' | 'city', reason: string) => void;
-  broadcastNightStart!: (timerEndsAt: number) => void;
+  // Speaking state
+  private speakingOrder:     string[] = [];
+  private currentSpeakerIdx: number   = -1;
+  private joinCounter:       number   = 0;   // increments on each new player
 
-  constructor(roomId: string) {
-    this.roomId = roomId;
-  }
+  // ── Callbacks wired in by socket layer ─────────────────────────────────
+  broadcastState!:        () => void;
+  sendRoles!:             () => void;
+  broadcastNightResult!:  (pub: NightResultPublic) => void;
+  sendDetectiveResult!:   (detectiveId: string, targetId: string, targetName: string, isMafia: boolean) => void;
+  broadcastDiscussionStart!: (timerEndsAt: number) => void;
+  broadcastVotingStart!:  (timerEndsAt: number) => void;
+  broadcastVoteUpdate!:   (votes: Record<string, number>) => void;
+  broadcastResult!:       (eliminatedId: string | null, eliminatedName: string | null) => void;
+  broadcastGameOver!:     (winner: 'mafia' | 'city', reason: string) => void;
+  broadcastNightStart!:   (timerEndsAt: number) => void;
+  broadcastSpeakingStart!:(speakerId: string, speakerName: string, timerEndsAt: number) => void;
+  sendYourTurn!:          (speakerId: string, timerEndsAt: number) => void;
+  broadcastSystem!:       (text: string) => void;
+
+  constructor(roomId: string) { this.roomId = roomId; }
 
   // ── Player management ────────────────────────────────────────────────────
 
   addPlayer(id: string, name: string): void {
     if (this.players.size === 0) this.hostId = id;
-    const player: Player = {
+    this.players.set(id, {
       id, name, roomId: this.roomId,
+      joinIndex: this.joinCounter++,
       role: null, alive: true, ready: false,
       nightTarget: null, blocked: false, voteCount: 0, dayVote: null,
-    };
-    this.players.set(id, player);
+    });
   }
 
   removePlayer(id: string): void {
@@ -57,26 +63,36 @@ export class GameRoom {
       const first = this.players.keys().next().value;
       if (first) this.hostId = first;
     }
+    // Remove from speaking order if needed
+    this.speakingOrder = this.speakingOrder.filter(sid => sid !== id);
   }
 
   getPlayer(id: string): Player | undefined { return this.players.get(id); }
-  getPlayers(): Player[] { return [...this.players.values()]; }
-  getHostId(): string { return this.hostId; }
-  getPhase(): Phase { return this.phase; }
-  isEmpty(): boolean { return this.players.size === 0; }
-  size():    number  { return this.players.size; }
+  getPlayers():   Player[] { return [...this.players.values()]; }
+  getHostId():    string   { return this.hostId; }
+  getPhase():     Phase    { return this.phase; }
+  isEmpty():      boolean  { return this.players.size === 0; }
+  size():         number   { return this.players.size; }
+  getMafiaIds():  string[] { return this.getPlayers().filter(p => p.role === Role.Mafia).map(p => p.id); }
 
   setReady(id: string, ready: boolean): void {
-    const p = this.players.get(id);
-    if (p) p.ready = ready;
+    const p = this.players.get(id); if (p) p.ready = ready;
+  }
+
+  canStart(): { ok: boolean; reason: string } {
+    const players = [...this.players.values()];
+    if (players.length < 4)  return { ok: false, reason: 'Минимум 4 игрока' };
+    if (players.length > 10) return { ok: false, reason: 'Максимум 10 игроков' };
+    if (!players.every(p => p.ready)) return { ok: false, reason: 'Не все нажали «Готов»' };
+    return { ok: true, reason: '' };
   }
 
   // ── Role assignment ──────────────────────────────────────────────────────
 
-  assignRoles(): void {
-    const alive = this.alivePlayers();
+  private assignRoles(): void {
+    const alive    = this.alivePlayers();
     const shuffled = [...alive].sort(() => Math.random() - 0.5);
-    const n = shuffled.length;
+    const n        = shuffled.length;
     const mafiaCount = Math.max(1, Math.floor(n / 3));
 
     const roles: Role[] = [
@@ -85,43 +101,173 @@ export class GameRoom {
       Role.Doctor,
       Role.Prostitute,
     ];
-    // fill rest with civilians
     while (roles.length < n) roles.push(Role.Civilian);
 
     shuffled.forEach((p, i) => { p.role = roles[i]; });
   }
 
-  getMafiaIds(): string[] {
-    return this.getPlayers().filter(p => p.role === Role.Mafia).map(p => p.id);
-  }
-
-  // ── Game flow ────────────────────────────────────────────────────────────
+  // ── Game start ───────────────────────────────────────────────────────────
 
   startGame(): void {
-    this.round = 0;
-    // reset alive / ready state
+    this.round  = 0;
+    this.winner = null;
+    this.lastNightResult = null;
     for (const p of this.players.values()) {
-      p.alive = true;
-      p.ready = false;
+      p.alive = true; p.ready = false;
+      p.nightTarget = null; p.blocked = false;
+      p.voteCount = 0; p.dayVote = null;
     }
     this.assignRoles();
     this.sendRoles();
-    this.startNight();
+    this.broadcastSystem(`Роли розданы. Игра началась! Раунд 1.`);
+    // ★ Game starts with Day (speaking round)
+    this.startSpeaking();
   }
 
-  private startNight(): void {
+  // ── Speaking round (Day phase) ────────────────────────────────────────────
+
+  private startSpeaking(): void {
     this.round++;
-    this.phase = Phase.Night;
+    this.phase = Phase.Speaking;
     this.clearTimer();
-    this.lastNightResult = null;
-    // reset night action fields
+
+    // Speaking order: all alive players in random order each round
+    this.speakingOrder = this.alivePlayers()
+      .map(p => p.id)
+      .sort(() => Math.random() - 0.5);
+    this.currentSpeakerIdx = -1;
+
+    this.broadcastState();
+    this.advanceSpeaker();
+  }
+
+  private advanceSpeaker(): void {
+    this.clearTimer();
+    this.currentSpeakerIdx++;
+
+    // Skip dead players (safety)
+    while (
+      this.currentSpeakerIdx < this.speakingOrder.length &&
+      !this.players.get(this.speakingOrder[this.currentSpeakerIdx])?.alive
+    ) {
+      this.currentSpeakerIdx++;
+    }
+
+    if (this.currentSpeakerIdx >= this.speakingOrder.length) {
+      // Everyone has spoken → go to free discussion
+      this.startDiscussion();
+      return;
+    }
+
+    const speakerId   = this.speakingOrder[this.currentSpeakerIdx];
+    const speakerName = this.players.get(speakerId)?.name ?? '?';
+    this.timerEndsAt  = Date.now() + TIMER_SPEECH;
+
+    this.broadcastState();
+    this.broadcastSpeakingStart(speakerId, speakerName, this.timerEndsAt);
+    this.sendYourTurn(speakerId, this.timerEndsAt);
+    this.broadcastSystem(`Говорит: ${speakerName} (${this.currentSpeakerIdx + 1}/${this.speakingOrder.length})`);
+
+    this.timerHandle = setTimeout(() => this.advanceSpeaker(), TIMER_SPEECH);
+  }
+
+  // Called when the current speaker presses "Закончил"
+  speakerDone(playerId: string): void {
+    if (this.phase !== Phase.Speaking) return;
+    if (this.speakingOrder[this.currentSpeakerIdx] !== playerId) return;
+    this.advanceSpeaker();
+  }
+
+  // ── Discussion ────────────────────────────────────────────────────────────
+
+  private startDiscussion(): void {
+    this.phase            = Phase.Discussion;
+    this.currentSpeakerIdx = -1;
+    this.timerEndsAt      = Date.now() + TIMER_DISCUSSION;
+    this.broadcastState();
+    this.broadcastDiscussionStart(this.timerEndsAt);
+    this.broadcastSystem('Свободное обсуждение — выскажитесь перед голосованием!');
+    this.timerHandle = setTimeout(() => this.startVoting(), TIMER_DISCUSSION);
+  }
+
+  // ── Voting ────────────────────────────────────────────────────────────────
+
+  private startVoting(): void {
+    this.phase        = Phase.Voting;
+    this.timerEndsAt  = Date.now() + TIMER_VOTING;
+    for (const p of this.players.values()) { p.voteCount = 0; p.dayVote = null; }
+    this.broadcastState();
+    this.broadcastVotingStart(this.timerEndsAt);
+    this.broadcastSystem('Голосование! Каждый голосует за того, кого считает мафией.');
+    this.timerHandle = setTimeout(() => this.processVoting(), TIMER_VOTING);
+  }
+
+  submitDayVote(voterId: string, targetId: string): boolean {
+    if (this.phase !== Phase.Voting) return false;
+    const voter  = this.players.get(voterId);
+    const target = this.players.get(targetId);
+    if (!voter || !target || !voter.alive || !target.alive) return false;
+    if (voter.dayVote) {
+      const prev = this.players.get(voter.dayVote);
+      if (prev) prev.voteCount--;
+    }
+    voter.dayVote = targetId;
+    target.voteCount++;
+    this.broadcastVoteUpdate(this.publicVotes());
+    this.maybeEarlyVoting();
+    return true;
+  }
+
+  private maybeEarlyVoting(): void {
+    if (this.alivePlayers().every(p => p.dayVote !== null)) {
+      this.clearTimer();
+      this.processVoting();
+    }
+  }
+
+  private processVoting(): void {
+    const alive    = this.alivePlayers();
+    const maxVotes = Math.max(0, ...alive.map(p => p.voteCount));
+    let   eliminatedId:   string | null = null;
+    let   eliminatedName: string | null = null;
+
+    if (maxVotes > 0) {
+      const candidates = alive.filter(p => p.voteCount === maxVotes);
+      if (candidates.length === 1) {
+        const el = candidates[0];
+        el.alive       = false;
+        eliminatedId   = el.id;
+        eliminatedName = el.name;
+      }
+    }
+
+    this.broadcastResult(eliminatedId, eliminatedName);
+
+    if (eliminatedName) {
+      this.broadcastSystem(`По итогам голосования выбыл: ${eliminatedName}.`);
+    } else {
+      this.broadcastSystem('Голосование не выявило единого решения — никто не выбыл.');
+    }
+
+    if (this.checkWinCondition()) return;
+
+    // ★ After voting → Night
+    this.timerHandle = setTimeout(() => this.startNight(), TIMER_RESULT);
+  }
+
+  // ── Night ─────────────────────────────────────────────────────────────────
+
+  private startNight(): void {
+    this.phase       = Phase.Night;
+    this.timerEndsAt = Date.now() + TIMER_NIGHT;
     for (const p of this.players.values()) {
       p.nightTarget = null;
       p.blocked     = false;
     }
-    this.timerEndsAt = Date.now() + TIMER_NIGHT;
+    this.lastNightResult = null;
     this.broadcastState();
     this.broadcastNightStart(this.timerEndsAt);
+    this.broadcastSystem('Город засыпает. Просыпается мафия...');
     this.timerHandle = setTimeout(() => this.processNight(), TIMER_NIGHT);
   }
 
@@ -131,7 +277,6 @@ export class GameRoom {
     const target = this.players.get(targetId);
     if (!actor || !target || !actor.alive || !target.alive) return false;
     actor.nightTarget = targetId;
-    // Check if all active-role players have submitted → early resolve
     this.maybeEarlyNight();
     return true;
   }
@@ -150,178 +295,80 @@ export class GameRoom {
   private processNight(): void {
     const alive = this.alivePlayers();
 
-    // 1. Prostitute blocks someone
-    const prostitute = alive.find(p => p.role === Role.Prostitute);
-    let blockedId: string | null = null;
-    if (prostitute && prostitute.nightTarget) {
-      blockedId = prostitute.nightTarget;
-      const blocked = this.players.get(blockedId);
-      if (blocked) blocked.blocked = true;
+    // 1. Проститутка блокирует
+    const prostitute = alive.find(p => p.role === Role.Prostitute && !p.blocked);
+    if (prostitute?.nightTarget) {
+      const bl = this.players.get(prostitute.nightTarget);
+      if (bl) bl.blocked = true;
     }
 
-    // 2. Mafia votes (blocked mafia members don't count)
-    const mafiaMembers = alive.filter(p => p.role === Role.Mafia && !p.blocked);
+    // 2. Мафия голосует за жертву
+    const mafiaAlive = alive.filter(p => p.role === Role.Mafia && !p.blocked);
     const mafiaVotes: Record<string, number> = {};
-    for (const m of mafiaMembers) {
-      if (m.nightTarget) {
-        mafiaVotes[m.nightTarget] = (mafiaVotes[m.nightTarget] ?? 0) + 1;
-      }
+    for (const m of mafiaAlive) {
+      if (m.nightTarget) mafiaVotes[m.nightTarget] = (mafiaVotes[m.nightTarget] ?? 0) + 1;
     }
     let mafiaTarget: string | null = null;
     if (Object.keys(mafiaVotes).length > 0) {
       const max = Math.max(...Object.values(mafiaVotes));
-      const candidates = Object.entries(mafiaVotes)
-        .filter(([, v]) => v === max).map(([k]) => k);
-      mafiaTarget = candidates[Math.floor(Math.random() * candidates.length)];
-    }
-    // fallback: if mafia couldn't agree, pick first mafia member's target
-    if (!mafiaTarget && mafiaMembers.length > 0 && mafiaMembers[0].nightTarget) {
-      mafiaTarget = mafiaMembers[0].nightTarget;
+      const best = Object.entries(mafiaVotes).filter(([, v]) => v === max).map(([k]) => k);
+      mafiaTarget = best[Math.floor(Math.random() * best.length)];
+    } else if (mafiaAlive[0]?.nightTarget) {
+      mafiaTarget = mafiaAlive[0].nightTarget;
     }
 
-    // 3. Doctor heals
-    const doctor = alive.find(p => p.role === Role.Doctor && !p.blocked);
+    // 3. Доктор лечит
+    const doctor  = alive.find(p => p.role === Role.Doctor && !p.blocked);
     const healedId = doctor?.nightTarget ?? null;
-    const healed = healedId !== null && healedId === mafiaTarget;
+    const healed   = !!healedId && healedId === mafiaTarget;
 
-    // 4. Apply kill
+    // 4. Убийство
     let killedId: string | null = null;
     if (mafiaTarget && !healed) {
       const victim = this.players.get(mafiaTarget);
-      if (victim) {
-        victim.alive = false;
-        killedId = victim.id;
-      }
+      if (victim) { victim.alive = false; killedId = victim.id; }
     }
 
-    // 5. Detective checks
+    // 5. Детектив проверяет
     const detective = alive.find(p => p.role === Role.Detective && !p.blocked);
-    if (detective && detective.nightTarget) {
+    if (detective?.nightTarget) {
       const target = this.players.get(detective.nightTarget);
       if (target) {
-        this.sendDetectiveResult(
-          detective.id,
-          target.id, target.name,
-          target.role === Role.Mafia
-        );
+        this.sendDetectiveResult(detective.id, target.id, target.name, target.role === Role.Mafia);
       }
     }
 
-    // 6. Build public result
-    const killedName = killedId ? this.players.get(killedId)?.name ?? null : null;
+    const killedName = killedId ? (this.players.get(killedId)?.name ?? null) : null;
     const pub: NightResultPublic = { killedName, healed };
     this.lastNightResult = pub;
 
-    this.phase = Phase.Result;
+    this.phase = Phase.NightResult;
+    this.timerEndsAt = Date.now() + TIMER_RESULT;
     this.broadcastState();
     this.broadcastNightResult(pub);
 
-    // Transition to Day after result display
-    this.timerHandle = setTimeout(() => {
-      if (this.checkWinCondition()) return;
-      this.startDay();
-    }, TIMER_RESULT);
-  }
-
-  private startDay(): void {
-    this.phase = Phase.Day;
-    this.timerEndsAt = Date.now() + TIMER_DAY;
-    this.lastNightResult = null;
-    this.broadcastState();
-    this.broadcastDayStart(this.timerEndsAt);
-    this.timerHandle = setTimeout(() => this.startVoting(), TIMER_DAY);
-  }
-
-  private startVoting(): void {
-    this.phase = Phase.Voting;
-    this.timerEndsAt = Date.now() + TIMER_VOTING;
-    // reset vote counts
-    for (const p of this.players.values()) {
-      p.voteCount = 0;
-      p.dayVote   = null;
+    if (killedName) {
+      this.broadcastSystem(healed ? `Доктор спас ${killedName}!` : `Этой ночью был убит: ${killedName}.`);
+    } else {
+      this.broadcastSystem('Ночь прошла тихо — никто не пострадал.');
     }
-    this.broadcastState();
-    this.broadcastVotingStart(this.timerEndsAt);
-    this.timerHandle = setTimeout(() => this.processVoting(), TIMER_VOTING);
-  }
-
-  submitDayVote(voterId: string, targetId: string): boolean {
-    if (this.phase !== Phase.Voting) return false;
-    const voter  = this.players.get(voterId);
-    const target = this.players.get(targetId);
-    if (!voter || !target || !voter.alive || !target.alive) return false;
-    // change vote
-    if (voter.dayVote) {
-      const prev = this.players.get(voter.dayVote);
-      if (prev) prev.voteCount--;
-    }
-    voter.dayVote = targetId;
-    target.voteCount++;
-    this.broadcastVoteUpdate(this.publicVotes());
-    this.maybeEarlyVoting();
-    return true;
-  }
-
-  private publicVotes(): Record<string, number> {
-    const out: Record<string, number> = {};
-    for (const p of this.alivePlayers()) out[p.id] = p.voteCount;
-    return out;
-  }
-
-  private maybeEarlyVoting(): void {
-    const alive = this.alivePlayers();
-    const allVoted = alive.every(p => p.dayVote !== null);
-    if (allVoted) {
-      this.clearTimer();
-      this.processVoting();
-    }
-  }
-
-  private processVoting(): void {
-    const alive = this.alivePlayers();
-    let maxVotes = 0;
-    for (const p of alive) if (p.voteCount > maxVotes) maxVotes = p.voteCount;
-
-    let eliminatedId: string | null = null;
-    let eliminatedName: string | null = null;
-
-    if (maxVotes > 0) {
-      const candidates = alive.filter(p => p.voteCount === maxVotes);
-      if (candidates.length === 1) {
-        // Majority -> eliminate
-        const el = candidates[0];
-        el.alive = false;
-        eliminatedId   = el.id;
-        eliminatedName = el.name;
-      }
-      // Tie → no elimination
-    }
-
-    this.phase = Phase.Result;
-    this.broadcastState();
-    this.broadcastResult(eliminatedId, eliminatedName);
 
     this.timerHandle = setTimeout(() => {
       if (this.checkWinCondition()) return;
-      this.startNight();
+      // ★ After night → new Speaking round
+      this.startSpeaking();
     }, TIMER_RESULT);
   }
 
-  // ── Win condition ────────────────────────────────────────────────────────
+  // ── Win condition ─────────────────────────────────────────────────────────
 
   private checkWinCondition(): boolean {
-    const alive = this.alivePlayers();
+    const alive      = this.alivePlayers();
     const mafiaAlive = alive.filter(p => p.role === Role.Mafia).length;
     const cityAlive  = alive.filter(p => p.role !== Role.Mafia).length;
 
-    if (mafiaAlive === 0) {
-      this.endGame('city', 'Вся мафия уничтожена!');
-      return true;
-    }
-    if (mafiaAlive >= cityAlive) {
-      this.endGame('mafia', 'Мафия захватила город!');
-      return true;
-    }
+    if (mafiaAlive === 0) { this.endGame('city',  'Вся мафия уничтожена! 🏙'); return true; }
+    if (mafiaAlive >= cityAlive) { this.endGame('mafia', 'Мафия захватила город! 🔫'); return true; }
     return false;
   }
 
@@ -333,7 +380,22 @@ export class GameRoom {
     this.broadcastGameOver(winner, reason);
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  resetToLobby(): void {
+    this.clearTimer();
+    this.phase             = Phase.Lobby;
+    this.winner            = null;
+    this.round             = 0;
+    this.lastNightResult   = null;
+    this.speakingOrder     = [];
+    this.currentSpeakerIdx = -1;
+    for (const p of this.players.values()) {
+      p.role = null; p.alive = true; p.ready = false;
+      p.nightTarget = null; p.blocked = false;
+      p.voteCount = 0; p.dayVote = null;
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   private alivePlayers(): Player[] {
     return [...this.players.values()].filter(p => p.alive);
@@ -343,48 +405,29 @@ export class GameRoom {
     if (this.timerHandle) { clearTimeout(this.timerHandle); this.timerHandle = null; }
   }
 
+  publicVotes(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const p of this.alivePlayers()) out[p.id] = p.voteCount;
+    return out;
+  }
+
   toPublicState(): RoomState {
-    const players: PublicPlayer[] = [...this.players.values()].map(p => ({
-      id:    p.id,
-      name:  p.name,
-      alive: p.alive,
-      ready: p.ready,
-    }));
+    // sort by joinIndex so all clients see the same order
+    const sorted = [...this.players.values()].sort((a, b) => a.joinIndex - b.joinIndex);
     return {
-      roomId:      this.roomId,
-      phase:       this.phase,
-      players,
-      round:       this.round,
-      timerEndsAt: this.timerEndsAt,
-      nightResult: this.lastNightResult,
-      dayVotes:    this.phase === Phase.Voting ? this.publicVotes() : {},
-      winner:      this.winner,
-      hostId:      this.hostId,
+      roomId:            this.roomId,
+      phase:             this.phase,
+      players:           sorted.map(p => ({
+        id: p.id, name: p.name, alive: p.alive, ready: p.ready, joinIndex: p.joinIndex,
+      })),
+      round:             this.round,
+      timerEndsAt:       this.timerEndsAt,
+      nightResult:       this.lastNightResult,
+      dayVotes:          this.phase === Phase.Voting ? this.publicVotes() : {},
+      winner:            this.winner,
+      hostId:            this.hostId,
+      speakingOrder:     this.speakingOrder,
+      currentSpeakerIdx: this.currentSpeakerIdx,
     };
-  }
-
-  canStart(): { ok: boolean; reason: string } {
-    const players = [...this.players.values()];
-    if (players.length < 4) return { ok: false, reason: 'Минимум 4 игрока' };
-    if (players.length > 10) return { ok: false, reason: 'Максимум 10 игроков' };
-    if (!players.every(p => p.ready)) return { ok: false, reason: 'Не все готовы' };
-    return { ok: true, reason: '' };
-  }
-
-  resetToLobby(): void {
-    this.clearTimer();
-    this.phase  = Phase.Lobby;
-    this.winner = null;
-    this.round  = 0;
-    this.lastNightResult = null;
-    for (const p of this.players.values()) {
-      p.role        = null;
-      p.alive       = true;
-      p.ready       = false;
-      p.nightTarget = null;
-      p.blocked     = false;
-      p.voteCount   = 0;
-      p.dayVote     = null;
-    }
   }
 }

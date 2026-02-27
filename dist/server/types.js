@@ -13,9 +13,10 @@ var Role;
 var Phase;
 (function (Phase) {
     Phase["Lobby"] = "lobby";
-    Phase["Night"] = "night";
-    Phase["Day"] = "day";
+    Phase["Speaking"] = "speaking";
+    Phase["Discussion"] = "discussion";
     Phase["Voting"] = "voting";
-    Phase["Result"] = "result";
+    Phase["NightResult"] = "nightresult";
+    Phase["Night"] = "night";
     Phase["GameOver"] = "gameover";
 })(Phase || (exports.Phase = Phase = {}));
